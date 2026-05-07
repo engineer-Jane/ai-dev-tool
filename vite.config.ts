@@ -105,12 +105,19 @@ function aiApiPlugin(env: Record<string, string>): Plugin {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const previewPort = Number(process.env.PORT)
   return {
     plugins: [react(), tailwindcss(), aiApiPlugin(env)],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
       },
+    },
+    // vercel dev 会注入 PORT；本地 npm run preview 仍默认 4173
+    preview: {
+      host: true,
+      port: Number.isFinite(previewPort) && previewPort > 0 ? previewPort : 4173,
+      strictPort: false,
     },
   }
 })

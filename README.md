@@ -95,7 +95,8 @@ npm run dev
 
 ```bash
 npm run build    # tsc -b && vite build
-npm run preview  # 预览 dist；与本项目配套的 /api/chat 会一并生效（需 Node 进程，非静态 CDN）
+npm run preview  # 仅 vite preview（需已 build）；/api 由 Vite 中间件提供
+npm run preview:vercel  # build + preview，供 vercel dev 与本地「生产态」自测
 npm run lint     # ESLint
 ```
 
@@ -108,6 +109,13 @@ npm run lint     # ESLint
 3. 重新部署后，前端与 **`/api/chat`** 同源，无需改 `BASE_URL`（根域名部署时）。
 
 若仍看到 HTML 形式的 NOT_FOUND，多是 **未触发最新部署** 或 **`api` 目录未被推送**；请在 Vercel 面板确认本次构建日志里包含 Serverless Functions。
+
+### 能在 Vercel「云端」执行 `npm run preview` 吗？
+
+**不能，也不需要。** 云端部署只做 **`npm run build`**：产出 `dist` 并由 CDN 托管；`/api/*` 走 Serverless。这与本地 **`vite preview`** 的目标一致（验证构建产物 + 同源接口），无需在构建流水线里再启动预览进程（否则会长时间阻塞且无退出）。
+
+- **线上验收**：直接用每次部署得到的 **Production URL**，或开启 Git 集成的 **Preview Deployment**（每个分支 / PR 一个预览地址，控制台里也叫 Preview）。
+- **本地对齐线上**：安装 [Vercel CLI](https://vercel.com/docs/cli) 后在仓库根目录执行 **`vercel dev`**。本项目在 **`vercel.json`** 里配置了 **`devCommand`** → **`npm run preview:vercel`**（先 **`npm run build`** 再 **`vite preview`**），并读取环境变量 **`PORT`**（与 CLI 一致）；这样会拉起带 **`/api/chat`** 中间件的预览服务器，同时在本地运行 `api/` 中的 Serverless 逻辑。
 
 ## 项目结构（摘要）
 
