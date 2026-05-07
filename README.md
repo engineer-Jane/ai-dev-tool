@@ -11,7 +11,7 @@
 | 组件 | shadcn/ui 风格（Radix Slot、`class-variance-authority`、`tailwind-merge`、`cn`） |
 | 图标 | lucide-react |
 | 代码高亮 | Prism.js（`markup` / `jsx` / `sql`；Vue 片段按 markup 高亮） |
-| 服务端能力 | 开发服务器内置 `POST /api/chat`、`GET /api/mcp/tools`（见 `vite.config.ts`） |
+| 服务端能力 | `npm run dev` 与 **`npm run preview`** 均在本地 Node 中挂载 `POST /api/chat`、`GET /api/mcp/tools`（见 `vite.config.ts`）；纯静态托管不包含该接口 |
 
 ## 功能概览
 
@@ -30,7 +30,7 @@
 - **Vue**：期望 `html`、`vue`（Vue 3 + `<script setup lang="ts">` + `<template>`）、`sql`。
 - **SQL**：侧重 PostgreSQL 风格的 `CREATE TABLE` / `INSERT`，并附带用于预览的 `html` 表格；默认不要求 JSX/Vue。
 
-## API 约定（开发环境）
+## API 约定（`vite dev` / `vite preview`，本地）
 
 ### `POST /api/chat`
 
@@ -54,6 +54,8 @@
 
 密钥读取：`DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`（与所选 `provider` 对应）。
 
+若配置了 **`base`**（如 GitHub Pages 子路径），前端会通过 `import.meta.env.BASE_URL` 请求带前缀的接口（例如 `/repo/api/chat`），服务端中间件会与 `config.base` 对齐；请勿再手写根路径 `/api/chat`。
+
 ### `GET /api/mcp/tools`
 
 返回 `tools`（与聊天接口一致）、`name`、`description`、`chatEndpoint: '/api/chat'`。
@@ -70,7 +72,7 @@
 
 ## 配置与环境变量
 
-复制 `.env.example` 为 `.env`，按需填写。**修改 `.env 后需重启 `npm run dev`。**
+复制 `.env.example` 为 `.env`，按需填写。**修改 `.env 后需重启 `npm run dev` 或 `npm run preview`。**
 
 | 变量 | 含义 |
 |------|------|
@@ -93,7 +95,7 @@ npm run dev
 
 ```bash
 npm run build    # tsc -b && vite build
-npm run preview  # 预览生产构建
+npm run preview  # 预览 dist；与本项目配套的 /api/chat 会一并生效（需 Node 进程，非静态 CDN）
 npm run lint     # ESLint
 ```
 

@@ -28,6 +28,20 @@ const EXAMPLES = [
   '帮我生成一个登录页面（包含账号登录、手机登录）',
 ]
 
+/** 与 vite.config base 一致：`BASE_URL` 非根时接口带同一前缀 */
+function apiEndpoints(): { chat: string; mcpTools: string } {
+  const base = import.meta.env.BASE_URL
+  const prefix = base.endsWith('/') ? base.slice(0, -1) : base
+  const join = (path: string) => {
+    const suffix = path.startsWith('/') ? path : `/${path}`
+    if (!prefix || prefix === '.' || prefix === '/') return suffix
+    return `${prefix}${suffix}`
+  }
+  return { chat: join('/api/chat'), mcpTools: join('/api/mcp/tools') }
+}
+
+const API = apiEndpoints()
+
 function langTabLabel(lang: string): string {
   if (lang === 'jsx') return 'React'
   if (lang === 'vue') return 'Vue'
@@ -84,7 +98,7 @@ export default function App() {
     setLoading(true)
     setRaw('')
     try {
-      const res = await fetch('/api/chat', {
+      const res = await fetch(API.chat, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -95,6 +109,8 @@ export default function App() {
         }),
       })
       const rawBody = await res.text()
+      const toParse = rawBody.replace(/^\uFEFF/, '').trim()
+      const contentType = res.headers.get('content-type') ?? '（无 Content-Type）'
       let data: {
         content?: string
         error?: string
@@ -103,15 +119,22 @@ export default function App() {
         usedTools?: boolean
       }
       try {
-        data = JSON.parse(rawBody) as typeof data
+        data = JSON.parse(toParse) as typeof data
       } catch {
         const looksHtml =
           rawBody.trimStart().startsWith('<') ||
           /<!DOCTYPE/i.test(rawBody.slice(0, 200))
+        const preview =
+          toParse.length === 0
+            ? '（空响应体 —— 常见原因：反向代理未转发 /api，或服务异常未写入正文）'
+            : `${toParse.slice(0, 320)}${toParse.length > 320 ? '…' : ''}`
+        const meta = [`HTTP ${res.status}`, `Content-Type: ${contentType}`, `正文：${preview}`].join(
+          '\n',
+        )
         throw new Error(
           looksHtml
-            ? '服务器返回了 HTML 而不是 JSON，说明当前访问地址下没有可用的 /api/chat（例如使用了静态托管、vite preview，或未启动带中间件的开发服务）。请在项目根目录执行 npm run dev，并用终端里给出的本地地址打开页面。'
-            : `接口返回内容无法解析为 JSON：${rawBody.slice(0, 200)}${rawBody.length > 200 ? '…' : ''}`,
+            ? `服务器返回了 HTML 而不是 JSON，当前环境可能没有可用的 /api/chat。\n请在本机项目根目录执行 npm run dev 或先 npm run build 再 npm run preview，使用终端里给出的本地地址打开页面；不要将「仅上传 dist 的静态托管」当作自带接口。\n---\n${meta}`
+            : `接口返回内容无法解析为 JSON（服务端未返回本应用约定的 JSON 形状）。\n---\n${meta}\n---\n请确认通过 npm run dev / npm run preview 访问；纯静态 CDN 部署需单独提供 POST /api/chat。`,
         )
       }
       if (!res.ok) {
@@ -122,7 +145,7 @@ export default function App() {
       pickActiveLang(content, outputTarget)
       if (data.mock) {
         setMockNotice(
-          '当前为离线演示：未配置所选提供商的 API Key，展示的是内置示例代码。在 .env 填写密钥并重启 npm run dev 后将调用真实模型。',
+          '当前为离线演示：未配置所选提供商的 API Key，展示的是内置示例代码。在 .env 填写密钥并重启 npm run dev 或 npm run preview 后将调用真实模型。',
         )
       }
       if (data.usedTools) {
@@ -198,7 +221,7 @@ export default function App() {
               支持 React / Vue / SQL 输出偏好、一键复制、localStorage 历史、OpenAI 兼容 Function Calling；MCP
               宿主可拉取{' '}
               <code className="rounded bg-zinc-800 px-1 py-0.5 text-xs">
-                GET /api/mcp/tools
+                GET {API.mcpTools}
               </code>{' '}
               工具定义。
             </p>
@@ -297,9 +320,9 @@ export default function App() {
                 )}
               </Button>
               <p className="text-xs text-zinc-500">
-                <code className="rounded bg-zinc-800 px-1 py-0.5">POST /api/chat</code>
+                <code className="rounded bg-zinc-800 px-1 py-0.5">POST {API.chat}</code>
                 {' · '}
-                <code className="rounded bg-zinc-800 px-1 py-0.5">GET /api/mcp/tools</code>
+                <code className="rounded bg-zinc-800 px-1 py-0.5">GET {API.mcpTools}</code>
               </p>
             </div>
             {toolsNotice ? (
@@ -313,7 +336,7 @@ export default function App() {
               </p>
             ) : null}
             {error ? (
-              <p className="rounded-lg border border-red-500/40 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+              <p className="whitespace-pre-wrap break-words rounded-lg border border-red-500/40 bg-red-950/40 px-3 py-2 text-sm text-red-200">
                 {error}
               </p>
             ) : null}

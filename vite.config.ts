@@ -1,9 +1,32 @@
 import path from 'node:path'
 import type { IncomingMessage } from 'node:http'
+import type { Connect } from 'vite'
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import type { Plugin } from 'vite'
+
+/** 与 import.meta.env.BASE_URL / config.base 对齐，例如 base 为 `/repo/` 时接口在 `/repo/api/chat */
+function joinUnderViteBase(viteBase: string, absPath: string): string {
+  const prefix = viteBase.endsWith('/') ? viteBase.slice(0, -1) : viteBase
+  const suffix = absPath.startsWith('/') ? absPath : `/${absPath}`
+  if (!prefix || prefix === '.' || prefix === '/') return suffix
+  return `${prefix}${suffix}`
+}
+
+function resolvedApiPaths(viteBase: string): { chat: string; mcpTools: string } {
+  return {
+    chat: joinUnderViteBase(viteBase, '/api/chat'),
+    mcpTools: joinUnderViteBase(viteBase, '/api/mcp/tools'),
+  }
+}
+
+function requestUrlPath(url: string | undefined): string {
+  if (!url) return '/'
+  const q = url.indexOf('?')
+  const p = q >= 0 ? url.slice(0, q) : url
+  return p.startsWith('/') ? p : `/${p}`
+}
 
 type ChatBody = {
   provider?: string
@@ -863,194 +886,197 @@ function systemPromptForTarget(target: OutputTarget, toolsEnabled: boolean): str
   ].join('\n')
 }
 
+function createAiChatMiddleware(
+  env: Record<string, string>,
+  viteBase: string,
+): Connect.NextHandleFunction {
+  const paths = resolvedApiPaths(viteBase)
+  return async (req, res, next) => {
+    const path = requestUrlPath(req.url)
+
+    if (req.method === 'GET' && path === paths.mcpTools) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8')
+      res.statusCode = 200
+      res.end(
+        JSON.stringify({
+          name: 'ai-dev-studio-tools',
+          description:
+            'OpenAI Chat Completions 兼容的 tools 定义；可由 MCP 宿主经 HTTP 桥接转发至 POST /api/chat（body 含 prompt、provider、outputTarget、useFunctionCalling）。',
+          tools: CODE_TOOLS,
+          chatEndpoint: paths.chat,
+        }),
+      )
+      return
+    }
+
+    if (req.method !== 'POST' || path !== paths.chat) {
+      return next()
+    }
+
+    res.setHeader('Content-Type', 'application/json; charset=utf-8')
+
+    let body: ChatBody
+    try {
+      body = await readJsonBody(req as IncomingMessage)
+    } catch {
+      res.statusCode = 400
+      res.end(JSON.stringify({ error: '无效的 JSON 请求体' }))
+      return
+    }
+
+    const providerKey = (body.provider ?? 'deepseek').toLowerCase()
+    const cfg = PROVIDERS[providerKey]
+    if (!cfg) {
+      res.statusCode = 400
+      res.end(JSON.stringify({ error: '不支持的 provider' }))
+      return
+    }
+
+    const userPrompt = (body.prompt ?? '').trim()
+    if (!userPrompt) {
+      res.statusCode = 400
+      res.end(JSON.stringify({ error: 'prompt 不能为空' }))
+      return
+    }
+
+    const outputTarget = normalizeTarget(body.outputTarget)
+    const disableFc = truthyEnv(
+      env.DISABLE_FUNCTION_CALLING ?? process.env.DISABLE_FUNCTION_CALLING,
+    )
+    const useFunctionCalling = !disableFc && body.useFunctionCalling !== false
+
+    const apiKey = String(env[cfg.envKey] ?? process.env[cfg.envKey] ?? '').trim()
+    const disableMock = truthyEnv(env.DISABLE_AI_MOCK ?? process.env.DISABLE_AI_MOCK)
+
+    if (!apiKey) {
+      if (!disableMock) {
+        res.statusCode = 200
+        res.end(
+          JSON.stringify({
+            content: mockMarkdownForPrompt(userPrompt, outputTarget),
+            mock: true,
+            usedTools: false,
+            outputTarget,
+          }),
+        )
+        return
+      }
+      res.statusCode = 500
+      res.end(
+        JSON.stringify({
+          error: `${cfg.envKey} 未配置或为空`,
+          detail: [
+            `请在项目根目录（与 vite.config.ts 同级）编辑 .env，写入一行：`,
+            `${cfg.envKey}=你的密钥`,
+            `（等号右侧粘贴真实 key，不要加引号，不要留空；改完后请重新执行 npm run dev 或 npm run preview。）`,
+            `若使用 OpenAI / 通义千问，请在页面切换「模型提供商」并配置 OPENAI_API_KEY / DASHSCOPE_API_KEY。`,
+            `若仅需离线演示 UI，请移除 .env 中的 DISABLE_AI_MOCK=1（或未设置该项），未配置密钥时将返回内置示例。`,
+          ].join('\n'),
+        }),
+      )
+      return
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    }
+
+    const messages = [
+      {
+        role: 'system' as const,
+        content: systemPromptForTarget(outputTarget, useFunctionCalling),
+      },
+      { role: 'user' as const, content: userPrompt },
+    ]
+
+    const basePayload = {
+      model: cfg.model,
+      messages,
+      temperature: 0.3,
+    }
+
+    try {
+      let payload: Record<string, unknown> = { ...basePayload }
+      if (useFunctionCalling) {
+        payload = {
+          ...payload,
+          tools: CODE_TOOLS,
+          tool_choice: 'auto',
+        }
+      }
+
+      let upstream = await fetch(cfg.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+      })
+
+      let text = await upstream.text()
+
+      if (!upstream.ok && useFunctionCalling && looksLikeToolUnsupported(text)) {
+        upstream = await fetch(cfg.url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(basePayload),
+        })
+        text = await upstream.text()
+      }
+
+      if (!upstream.ok) {
+        res.statusCode = upstream.status
+        res.end(
+          JSON.stringify({
+            error: '上游 API 错误',
+            detail: upstreamErrorDetail(text),
+          }),
+        )
+        return
+      }
+
+      const data = JSON.parse(text) as Parameters<typeof extractContentFromChoice>[0]
+      let { content, usedTools } = extractContentFromChoice(data)
+
+      if (useFunctionCalling && !content.trim()) {
+        const msg = data.choices?.[0]?.message
+        if (msg?.tool_calls?.length && !usedTools) {
+          content =
+            parseToolCallsToMarkdown(msg.tool_calls) ??
+            '模型返回了 tool_calls，但参数无法解析，请重试或关闭「Function Calling」。'
+          usedTools = Boolean(parseToolCallsToMarkdown(msg.tool_calls))
+        }
+      }
+
+      res.statusCode = 200
+      res.end(
+        JSON.stringify({
+          content,
+          mock: false,
+          usedTools,
+          outputTarget,
+        }),
+      )
+    } catch (e) {
+      res.statusCode = 502
+      res.end(
+        JSON.stringify({
+          error: '调用模型失败',
+          detail: e instanceof Error ? e.message : String(e),
+        }),
+      )
+    }
+  }
+}
+
 function aiApiPlugin(env: Record<string, string>): Plugin {
   return {
     name: 'ai-chat-api',
+    enforce: 'pre',
     configureServer(server) {
-      server.middlewares.use(async (req, res, next) => {
-        if (req.url?.startsWith('/api/mcp/tools') && req.method === 'GET') {
-          res.setHeader('Content-Type', 'application/json; charset=utf-8')
-          res.statusCode = 200
-          res.end(
-            JSON.stringify({
-              name: 'ai-dev-studio-tools',
-              description:
-                'OpenAI Chat Completions 兼容的 tools 定义；可由 MCP 宿主经 HTTP 桥接转发至 POST /api/chat（body 含 prompt、provider、outputTarget、useFunctionCalling）。',
-              tools: CODE_TOOLS,
-              chatEndpoint: '/api/chat',
-            }),
-          )
-          return
-        }
-
-        if (!req.url?.startsWith('/api/chat') || req.method !== 'POST') {
-          return next()
-        }
-
-        res.setHeader('Content-Type', 'application/json; charset=utf-8')
-
-        let body: ChatBody
-        try {
-          body = await readJsonBody(req)
-        } catch {
-          res.statusCode = 400
-          res.end(JSON.stringify({ error: '无效的 JSON 请求体' }))
-          return
-        }
-
-        const providerKey = (body.provider ?? 'deepseek').toLowerCase()
-        const cfg = PROVIDERS[providerKey]
-        if (!cfg) {
-          res.statusCode = 400
-          res.end(JSON.stringify({ error: '不支持的 provider' }))
-          return
-        }
-
-        const userPrompt = (body.prompt ?? '').trim()
-        if (!userPrompt) {
-          res.statusCode = 400
-          res.end(JSON.stringify({ error: 'prompt 不能为空' }))
-          return
-        }
-
-        const outputTarget = normalizeTarget(body.outputTarget)
-        const disableFc = truthyEnv(
-          env.DISABLE_FUNCTION_CALLING ?? process.env.DISABLE_FUNCTION_CALLING,
-        )
-        const useFunctionCalling =
-          !disableFc && body.useFunctionCalling !== false
-
-        const apiKey = String(
-          env[cfg.envKey] ?? process.env[cfg.envKey] ?? '',
-        ).trim()
-        const disableMock = truthyEnv(
-          env.DISABLE_AI_MOCK ?? process.env.DISABLE_AI_MOCK,
-        )
-
-        if (!apiKey) {
-          if (!disableMock) {
-            res.statusCode = 200
-            res.end(
-              JSON.stringify({
-                content: mockMarkdownForPrompt(userPrompt, outputTarget),
-                mock: true,
-                usedTools: false,
-                outputTarget,
-              }),
-            )
-            return
-          }
-          res.statusCode = 500
-          res.end(
-            JSON.stringify({
-              error: `${cfg.envKey} 未配置或为空`,
-              detail: [
-                `请在项目根目录（与 vite.config.ts 同级）编辑 .env，写入一行：`,
-                `${cfg.envKey}=你的密钥`,
-                `（等号右侧粘贴真实 key，不要加引号，不要留空；改完后必须重新执行一次 npm run dev。）`,
-                `若使用 OpenAI / 通义千问，请在页面切换「模型提供商」并配置 OPENAI_API_KEY / DASHSCOPE_API_KEY。`,
-                `若仅需离线演示 UI，请移除 .env 中的 DISABLE_AI_MOCK=1（或未设置该项），未配置密钥时将返回内置示例。`,
-              ].join('\n'),
-            }),
-          )
-          return
-        }
-
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        }
-
-        const messages = [
-          {
-            role: 'system' as const,
-            content: systemPromptForTarget(outputTarget, useFunctionCalling),
-          },
-          { role: 'user' as const, content: userPrompt },
-        ]
-
-        const basePayload = {
-          model: cfg.model,
-          messages,
-          temperature: 0.3,
-        }
-
-        try {
-          let payload: Record<string, unknown> = { ...basePayload }
-          if (useFunctionCalling) {
-            payload = {
-              ...payload,
-              tools: CODE_TOOLS,
-              tool_choice: 'auto',
-            }
-          }
-
-          let upstream = await fetch(cfg.url, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
-          })
-
-          let text = await upstream.text()
-
-          if (
-            !upstream.ok &&
-            useFunctionCalling &&
-            looksLikeToolUnsupported(text)
-          ) {
-            upstream = await fetch(cfg.url, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify(basePayload),
-            })
-            text = await upstream.text()
-          }
-
-          if (!upstream.ok) {
-            res.statusCode = upstream.status
-            res.end(
-              JSON.stringify({
-                error: '上游 API 错误',
-                detail: upstreamErrorDetail(text),
-              }),
-            )
-            return
-          }
-
-          const data = JSON.parse(text) as Parameters<
-            typeof extractContentFromChoice
-          >[0]
-          let { content, usedTools } = extractContentFromChoice(data)
-
-          if (useFunctionCalling && !content.trim()) {
-            const msg = data.choices?.[0]?.message
-            if (msg?.tool_calls?.length && !usedTools) {
-              content =
-                parseToolCallsToMarkdown(msg.tool_calls) ??
-                '模型返回了 tool_calls，但参数无法解析，请重试或关闭「Function Calling」。'
-              usedTools = Boolean(parseToolCallsToMarkdown(msg.tool_calls))
-            }
-          }
-
-          res.statusCode = 200
-          res.end(
-            JSON.stringify({
-              content,
-              mock: false,
-              usedTools,
-              outputTarget,
-            }),
-          )
-        } catch (e) {
-          res.statusCode = 502
-          res.end(
-            JSON.stringify({
-              error: '调用模型失败',
-              detail: e instanceof Error ? e.message : String(e),
-            }),
-          )
-        }
-      })
+      server.middlewares.use(createAiChatMiddleware(env, server.config.base))
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(createAiChatMiddleware(env, server.config.base))
     },
   }
 }
