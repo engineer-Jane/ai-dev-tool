@@ -99,10 +99,24 @@ npm run preview  # 预览 dist；与本项目配套的 /api/chat 会一并生效
 npm run lint     # ESLint
 ```
 
+## Vercel 部署
+
+仓库含 **`api/chat.ts`**、**`api/mcp/tools.ts`**（Serverless）与 **`vercel.json`**：`POST /api/chat`、`GET /api/mcp/tools` 由 Vercel 运行 Node 函数，静态页面仍由 **`dist/`** 提供。
+
+1. 将项目导入 Vercel，使用默认 **Build Command**：`npm run build`，**Output Directory**：`dist`（与 `vercel.json` 一致即可）。
+2. 在 Vercel 项目 **Environment Variables** 中配置与本地相同的密钥，例如 `DEEPSEEK_API_KEY`、`OPENAI_API_KEY`、`DASHSCOPE_API_KEY`；可选 `DISABLE_AI_MOCK`、`DISABLE_FUNCTION_CALLING`。
+3. 重新部署后，前端与 **`/api/chat`** 同源，无需改 `BASE_URL`（根域名部署时）。
+
+若仍看到 HTML 形式的 NOT_FOUND，多是 **未触发最新部署** 或 **`api` 目录未被推送**；请在 Vercel 面板确认本次构建日志里包含 Serverless Functions。
+
 ## 项目结构（摘要）
 
 ```
-vite.config.ts          # Vite + Tailwind；/api/chat、/api/mcp/tools；mock 与上游调用
+vite.config.ts          # Vite + Tailwind；开发/预览中间层转发至 server 逻辑
+server/aiChatCore.ts    # /api/chat 共用核心（Vite 与 Vercel）
+api/chat.ts             # Vercel：POST /api/chat
+api/mcp/tools.ts        # Vercel：GET /api/mcp/tools
+vercel.json             # 构建产物目录与 SPA fallback
 src/App.tsx             # 主界面、示例词、历史与请求参数
 src/lib/history.ts      # localStorage 历史（40 条上限）
 src/lib/outputTarget.ts # 输出栈类型与选项文案
