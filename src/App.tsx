@@ -94,12 +94,25 @@ export default function App() {
           useFunctionCalling,
         }),
       })
-      const data = (await res.json()) as {
+      const rawBody = await res.text()
+      let data: {
         content?: string
         error?: string
         detail?: string
         mock?: boolean
         usedTools?: boolean
+      }
+      try {
+        data = JSON.parse(rawBody) as typeof data
+      } catch {
+        const looksHtml =
+          rawBody.trimStart().startsWith('<') ||
+          /<!DOCTYPE/i.test(rawBody.slice(0, 200))
+        throw new Error(
+          looksHtml
+            ? '服务器返回了 HTML 而不是 JSON，说明当前访问地址下没有可用的 /api/chat（例如使用了静态托管、vite preview，或未启动带中间件的开发服务）。请在项目根目录执行 npm run dev，并用终端里给出的本地地址打开页面。'
+            : `接口返回内容无法解析为 JSON：${rawBody.slice(0, 200)}${rawBody.length > 200 ? '…' : ''}`,
+        )
       }
       if (!res.ok) {
         throw new Error(data.detail ?? data.error ?? `请求失败 (${res.status})`)
